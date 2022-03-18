@@ -1,0 +1,201 @@
+---
+title: "Data Driven Emotion Dynamics Code"
+author: "Monica Kullar"
+output: html_document
+---
+Table of Contents
+1. Pre-processing ESM data
+2. Confirmatory groups GIMME analysis - clinical diagnostic subgroups
+3. Exploratory groups GIMME analysis - data-driven subgroups
+4. Final GIMME solution evaluation
+
+```{r}
+#packages used
+library(dplyr)
+library(data.table)
+library(imputeTS)
+library(pracma)
+
+##GIMME packages
+devtools::install_github("GatesLab/gimme/tree/master/gimme", force= TRUE, dependencies = TRUE)
+#devtools::install_github("GatesLab/gimme/gimme", force=TRUE)
+library(gimme)
+library(perturbR)
+```
+
+#1. Pre-processing ESM data
+```{r}
+# Impute data in order to use standardized residuals of time-series data
+esmdata <- read.csv("~/esmdata.csv") #read in esmdata from your local filepath
+
+b1var <- esmdata
+    shortem <- c("moniker", "time", "Happy_e","Enthusiastic","Pleased", "Relaxed", "Nervous", "Sad", "Irritated", "Angry", "Stressed", "MWoccur", "EmotionChronometry")
+    b1var <- b1var[shortem]
+    imputevar <- c("Happy_e","Enthusiastic","Pleased", "Relaxed", "Nervous", "Sad", "Irritated", "Angry", "Stressed", "MWoccur", "EmotionChronometry")
+    b1var$moniker <- as.factor(b1var$moniker)
+#loop through participants
+for(i in levels(b1var$moniker)) {
+    b1varimp <- b1var[b1var$moniker == i,]
+        for(j in imputevar) {
+          b1varimp[,j] <- na_ma(b1varimp[,j], k=2, weighting = "simple")
+        }
+    #save all files in folder for use at individual level
+    savefile <- paste0 ("~/step1/", i, ".csv", sep = "") #save first preprocessed step here to a folder you name 'step1' (or change the name to what you would like)
+    write.csv(b1varimp, file = savefile, row.names = FALSE)
+    print(paste("Dataframe Saved:", i))
+}
+    # Reduce down the most highly correlating emotion variables used in analysis of input variables
+    data <- rbindlist(lapply(list.files("~/step1/", full.names = TRUE), fread), fill = TRUE) #read in individual files from prior step
+        data$moniker <- as.factor(data$moniker)
+    #reduce down the most highly correlating emotion variables
+    data$HighCorrNegative <- (data$Angry + data$Irritated)/2 #referred to as "Angry" in manuscript for ease of interpreting
+    data$HighCorrPositive <- (data$Happy_e + data$Pleased)/2 #referred to as "Happy" in manuscript for ease of interpreting
+    data <- as.data.frame(data)
+    corrred <- c("moniker", "time", "HighCorrPositive", "HighCorrNegative", "Enthusiastic", "Relaxed", "Sad", "Nervous", "Stressed", "MWoccur", "EmotionChronometry")
+    data <- data[corrred]
+
+# Remove linear trends in data
+scaled.dat <- scale(data[,3:11]) #standardize
+names <- data[,1:2]
+scaled.dat <- cbind(names, scaled.dat)
+data <- scaled.dat
+
+for(i in levels(data$moniker)) {
+    data1 <- data[data$moniker == i,]
+                data1$Enthusiastic <- detrend(data1$Enthusiastic, tt = 'linear')
+                data1$Relaxed <- detrend(data1$Relaxed, tt = 'linear')
+                data1$Nervous <- detrend(data1$Nervous, tt = 'linear')
+                data1$Sad <- detrend(data1$Sad, tt = 'linear')
+                data1$HighCorrPositive <- detrend(data1$HighCorrPositive, tt = 'linear') #Happy, Pleased collapsed
+                data1$HighCorrNegative <- detrend(data1$HighCorrNegative, tt = 'linear') #Angry, Irritated collapsed
+                data1$Stressed <- detrend(data1$Stressed, tt = 'linear')
+                data1$MWoccur <- detrend(data1$MWoccur, tt = 'linear')
+                data1$EmotionChronometry <- detrend(data1$EmotionChronometry, tt = 'linear')
+    savefile <- paste0 ("~/step2/", i, ".csv", sep = "") #save next preprocessed step here to a folder you name 'step2' (or change the name to what you would like)
+    write.csv(data1, file = savefile, row.names = FALSE)
+    print(paste("Dataframe Saved:", i))
+}
+
+# Make sure timing is equally spaced, provide the overnight NA value for overnight spacing of self-report and diurnal time, or exogneous time variable taken as square root of time of day.
+datadetrend <- rbindlist(lapply(list.files("~/step2/", full.names = TRUE), fread), fill = TRUE) #read in individual files from prior step
+    datadetrend$moniker <- as.factor(datadetrend$moniker)
+diurnaltime <- read.csv("~/overnightanddiurnaltime.csv") #time=ESM timepoint, contime=the continuous order of timepoint occurrence for ordering, raw time=timepoint by hours in the day, TimeofDay=diurnal time calculated by square root of time based on literature.
+diurnaltime <- diurnaltime[,-3]
+for(i in levels(datadetrend$moniker)) {
+    datad1 <- datadetrend[datadetrend$moniker == i,]
+          datad1 <- merge(diurnaltime, datad1, by = "time", all = TRUE)
+          datad1$moniker[is.na(datad1$moniker)] <- datad1$moniker[1]
+          datad1 <- datad1[order(datad1$contime),]
+          remove <- c(1,2,3) #remove original time, continuous time, and moniker in order to feed into GIMME
+          datad1 <- datad1[, -(remove)]
+    savefile <- paste0 ("~/finaloutput/", i, ".csv", sep = "") #save final preprocessed step here to a folder you name 'finaloutput' (or change the name to what you would like)
+    write.csv(datad1, file = savefile, row.names = FALSE)
+    print(paste("Dataframe Saved:", i))
+}
+## Pre-processing Complete
+```
+
+#2. Confirmatory groups GIMME analysis - clinical diagnostic subgroups
+```{r}
+########################################################
+#   CONFIRMATORY 2-GROUPS: ALL CLINICAL vs. HEALTHY    #
+########################################################
+csgimme2group <- read.csv("~/CS-2gimmeGroups.csv", header = FALSE) #read in clinical group assignments
+csgimme2group <- as.data.frame(csgimme2group)
+
+outputcs2 <- gimme(data = "~/finaloutput", #folder with individual pre-processed data files named by ID
+    out = "~/2CS-GIMME_output",  #folder to save output
+    sep = ",",            
+    header = TRUE,        
+    subgroup = TRUE,        
+    confirm_subgroup = csgimme2group, #confirmatory assignments of clinical diagnostic group
+    exogenous = "TimeofDay", #diurnal time of day
+    groupcutoff = .75,       
+    subcutoff = .51         
+    )        
+
+########################################################
+#   CONFIRMATORY 3-GROUPS: MDD vs. BPD vs. HEALTHY     #
+########################################################
+csgimme3group <- read.csv("~/CS-3gimmeGroups.csv", header = FALSE)
+csgimme3group <- as.data.frame(csgimme3group)
+
+outputcs3 <- gimme(data = "~/finaloutput",
+    out = "~/3CS-GIMME_output",  
+    sep = ",",            
+    header = TRUE,        
+    subgroup = TRUE,        
+    confirm_subgroup = csgimme3group, 
+    exogenous = "TimeofDay",
+    groupcutoff = .75,       
+    subcutoff = .51         
+    )    
+
+###############################################################
+#   CONFIRMATORY 4-GROUPS: MDD vs. REM vs. BPD vs. HEALTHY    #
+###############################################################
+csgimme4group <- read.csv("~/CS-gimme_groupassignments/CS-4gimmeGroups.csv", header = FALSE)
+csgimme4group <- as.data.frame(csgimme4group)
+
+outputcs4 <- gimme(data = "~/finaloutput",
+    out = "~/4CS-GIMME_output",  
+    sep = ",",            
+    header = TRUE,        
+    subgroup = TRUE,        
+    confirm_subgroup = csgimme4group, 
+    exogenous = "TimeofDay",
+    groupcutoff = .75,       
+    subcutoff = .51         
+    )    
+```
+
+#3. Data-driven groups GIMME analysis - data-driven subgroups
+```{r}
+##################################
+##     S-GIMME, DATA-DRIVEN     ##
+##################################
+
+sgimmefit <- gimme(data = "~/finaloutput", #folder with individual pre-processed data files named by ID
+         out = "~/datadrivenGIMME_output", #folder to save output
+         sep = ",",
+         header = TRUE,
+         ar = TRUE,
+         plot = TRUE,
+         subgroup = TRUE,
+         paths = NULL, 
+         exogenous = "TimeofDay",
+         groupcutoff = .75, 
+         subcutoff   = .51) 
+```
+
+#4. Final GIMME solution evaluation
+```{r}
+##########
+#ROBUSTNESS VALUES FOR S-GIMME SUBGROUP SOLUTION
+##########
+#############################################################################
+#method 1: looking at robustness of solution to minor perturbation of edges
+#############################################################################
+similarity <- as.matrix(read.csv("~/datadrivenGIMME_output/similarityMatrix.csv", header = F)) #read in similarity matrix
+evaluatecorr1 <- perturbR(sym.matrix = similarity)
+#The VI value for when 20% of nodes are randomly switched:
+evaluatecorr1$vi20mark
+#The index for when this occurred for the first time in results
+min(which(colMeans(evaluatecorr1$VI)>evaluatecorr1$vi20mark))
+#The alpha/percent that corresponds with this index:
+evaluatecorr1$percent[min(which(colMeans(evaluatecorr1$VI)>evaluatecorr1$vi20mark))]
+#the ARI values:
+evaluatecorr1$ari20mark 
+mean(evaluatecorr1$ARI[,which(round(evaluatecorr1$percent, digits = 2) == .20)])
+
+#########################################################
+#method 2: Look at distribution of modularity values. ##
+#########################################################
+#The modularity value from the solution on the original matrix:
+evaluatecorr1$modularity[1,1]
+#against the distribution of randomly generated graphs (matrices) with similar properties to ours:
+hist(evaluatecorr1$modularity[,which(round(evaluatecorr1$percent, digits = 2) ==1.00)],
+xlim = c(0,1), xlab = "Modularity Values", main = "Histogram of Modularity Values")
+abline(v = evaluatecorr1$modularity[1,1], col = "red")
+evaluatecorr1$cutoff
+```
